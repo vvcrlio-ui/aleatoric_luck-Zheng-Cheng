@@ -16,6 +16,8 @@ from sklearn.model_selection import train_test_split
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from evaluation import r2_against_training_mean, training_mean_null_mse
+from experiment import parallel_preference
 from model_registry import MODEL_NAMES, make_model
 
 
@@ -66,7 +68,7 @@ def main():
     )
     y_train = df.iloc[train_idx][args.outcome]
     y_test = df.iloc[test_idx][args.outcome]
-    null_mse = mean_squared_error(y_test, np.full(len(y_test), y_train.mean()))
+    null_mse = training_mean_null_mse(y_test, y_train)
 
     set_columns = {}
     for label, prefixes in PREDICTOR_SETS.items():
@@ -88,8 +90,10 @@ def main():
                 "outcome": args.outcome,
                 "n_predictors": len(cols),
                 "mse": mse,
-                "r2": r2_score(y_test, pred),
-                "r2_train_mean_baseline": 1 - mse / null_mse,
+                "r2_test_mean_baseline": r2_score(y_test, pred),
+                "r2_train_mean_baseline": r2_against_training_mean(
+                    mse, y_test, y_train
+                ),
                 "null_mse": null_mse,
                 "seed": args.seed,
                 "status": "ok",
@@ -102,7 +106,7 @@ def main():
                 "outcome": args.outcome,
                 "n_predictors": len(cols),
                 "mse": np.nan,
-                "r2": np.nan,
+                "r2_test_mean_baseline": np.nan,
                 "r2_train_mean_baseline": np.nan,
                 "null_mse": null_mse,
                 "seed": args.seed,
@@ -111,7 +115,11 @@ def main():
             }
 
     jobs = [(model, set_name) for model in args.models for set_name in set_columns]
-    rows = Parallel(n_jobs=args.n_jobs, batch_size=1, prefer="threads")(
+    rows = Parallel(
+        n_jobs=args.n_jobs,
+        batch_size=1,
+        prefer=parallel_preference(args.models),
+    )(
         delayed(run_one)(*job) for job in jobs
     )
     pd.DataFrame(rows).sort_values(["model", "set"]).to_csv(out_path, index=False)

@@ -71,7 +71,7 @@ def main():
             {
                 "model": "xgboost_source_fixed_90",
                 "mse": mean_squared_error(y_test, preds),
-                "r2": r2_score(y_test, preds),
+                "r2_test_mean_baseline": r2_score(y_test, preds),
                 "seed": args.seed,
             }
         ]

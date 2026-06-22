@@ -16,6 +16,15 @@ from sklearn.model_selection import train_test_split
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from experiment import (
+    add_metadata,
+    build_experiment_metadata,
+    load_checkpoint,
+    model_run_settings,
+    parallel_preference,
+    rows_for_experiment,
+    write_checkpoint,
+)
 from model_registry import MODEL_NAMES, make_model
 
 
@@ -38,17 +47,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _write_checkpoint(existing: pd.DataFrame, rows: list[dict], out_path: Path) -> None:
-    frames = [frame for frame in (existing, pd.DataFrame(rows)) if not frame.empty]
-    if not frames:
-        return
-    result = pd.concat(frames, ignore_index=True)
-    result = result.drop_duplicates(["model", "k", "seed"], keep="last")
-    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
-    result.sort_values(["model", "k", "seed"]).to_csv(tmp, index=False)
-    tmp.replace(out_path)
-
-
 def main():
     args = parse_args()
     data_path = Path(args.data)
@@ -63,6 +61,14 @@ def main():
     predictors = [col for col in df.columns if col.startswith(("Aset", "Bset"))]
     if not predictors:
         raise ValueError("No Aset/Bset predictors found in the input data.")
+    metadata = build_experiment_metadata(
+        kind="feature_sets",
+        data_path=data_path,
+        outcome=args.outcome,
+        test_size=args.test_size,
+        split_seed=args.seed,
+        extra={"n_sizes": args.n_sizes, **model_run_settings(args.models)},
+    )
 
     X_train, X_test, y_train, y_test = train_test_split(
         df[predictors],
@@ -86,27 +92,33 @@ def main():
             model = make_model(model_name, seed=draw_seed, n_jobs=1)
             model.fit(X_train.loc[:, cols], y_train)
             preds = model.predict(X_test.loc[:, cols])
-            return {
-                "model": model_name,
-                "k": int(k),
-                "seed": draw_seed,
-                "n_features_total": len(feature_names),
-                "mse": mean_squared_error(y_test, preds),
-                "r2": r2_score(y_test, preds),
-                "status": "ok",
-                "error": "",
-            }
+            return add_metadata(
+                {
+                    "model": model_name,
+                    "k": int(k),
+                    "seed": draw_seed,
+                    "n_features_total": len(feature_names),
+                    "mse": mean_squared_error(y_test, preds),
+                    "r2_test_mean_baseline": r2_score(y_test, preds),
+                    "status": "ok",
+                    "error": "",
+                },
+                metadata,
+            )
         except Exception as exc:
-            return {
-                "model": model_name,
-                "k": int(k),
-                "seed": draw_seed,
-                "n_features_total": len(feature_names),
-                "mse": np.nan,
-                "r2": np.nan,
-                "status": "failed",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            return add_metadata(
+                {
+                    "model": model_name,
+                    "k": int(k),
+                    "seed": draw_seed,
+                    "n_features_total": len(feature_names),
+                    "mse": np.nan,
+                    "r2_test_mean_baseline": np.nan,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                metadata,
+            )
 
     jobs = [
         (model_name, int(k), args.seed + draw)
@@ -114,21 +126,32 @@ def main():
         for k in sizes
         for draw in range(args.n_draws)
     ]
-    existing = pd.read_csv(out_path) if out_path.exists() else pd.DataFrame()
+    existing = load_checkpoint(out_path)
+    current = rows_for_experiment(existing, metadata["experiment_id"])
     completed = set()
-    if not existing.empty:
-        ok = existing[existing.get("status", "ok").eq("ok")] if "status" in existing else existing
+    if not current.empty:
+        ok = current[current["status"].eq("ok")] if "status" in current else current
         completed = set(zip(ok["model"], ok["k"].astype(int), ok["seed"].astype(int)))
     pending = [job for job in jobs if job not in completed]
     new_rows: list[dict] = []
     for start in range(0, len(pending), args.batch_size):
         batch = pending[start : start + args.batch_size]
         new_rows.extend(
-            Parallel(n_jobs=args.n_jobs, batch_size=1, prefer="threads")(
+            Parallel(
+                n_jobs=args.n_jobs,
+                batch_size=1,
+                prefer=parallel_preference(args.models),
+            )(
                 delayed(run_one)(*job) for job in batch
             )
         )
-        _write_checkpoint(existing, new_rows, out_path)
+        write_checkpoint(
+            existing,
+            new_rows,
+            out_path,
+            key_columns=["model", "k", "seed"],
+            sort_columns=["model", "k", "seed"],
+        )
 
 
 if __name__ == "__main__":

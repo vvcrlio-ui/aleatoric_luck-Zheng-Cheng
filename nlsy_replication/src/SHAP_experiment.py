@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,16 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from experiment import (
+    add_metadata,
+    build_experiment_metadata,
+    file_sha256,
+    load_checkpoint,
+    rows_for_experiment,
+    write_checkpoint,
+)
 
 
 def parse_args():
@@ -67,7 +78,7 @@ def evaluate_feature_count(
                     "k": k,
                     "direction": direction,
                     "mse": mean_squared_error(y_test, preds),
-                    "r2": r2_score(y_test, preds),
+                    "r2_test_mean_baseline": r2_score(y_test, preds),
                     "status": "ok",
                     "error": "",
                 }
@@ -78,7 +89,7 @@ def evaluate_feature_count(
                     "k": k,
                     "direction": direction,
                     "mse": float("nan"),
-                    "r2": float("nan"),
+                    "r2_test_mean_baseline": float("nan"),
                     "status": "failed",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
@@ -111,16 +122,25 @@ def main():
     missing = [feature for feature in ordered if feature not in df]
     if missing:
         raise KeyError(f"SHAP file contains {len(missing)} features absent from data.")
+    metadata = build_experiment_metadata(
+        kind="shap_ordering",
+        data_path=data_path,
+        outcome=args.outcome,
+        test_size=args.test_size,
+        split_seed=args.seed,
+        extra={"importance_sha256": file_sha256(importance_path)},
+    )
     X_train, X_test, y_train, y_test = train_test_split(
         df[ordered],
         df[args.outcome],
         test_size=args.test_size,
         random_state=args.seed,
     )
-    existing = pd.read_csv(out_path) if out_path.exists() else pd.DataFrame()
+    existing = load_checkpoint(out_path)
+    current = rows_for_experiment(existing, metadata["experiment_id"])
     completed = set()
-    if not existing.empty:
-        ok = existing[existing["status"].eq("ok")] if "status" in existing else existing
+    if not current.empty:
+        ok = current[current["status"].eq("ok")] if "status" in current else current
         completed = set(zip(ok["k"].astype(int), ok["direction"]))
     pending = [
         k
@@ -137,14 +157,19 @@ def main():
             for k in batch
         )
         for result in batch_results:
-            rows.extend(result)
-        frames = [frame for frame in (existing, pd.DataFrame(rows)) if not frame.empty]
-        combined = pd.concat(frames, ignore_index=True)
-        combined = combined.drop_duplicates(["k", "direction"], keep="last")
-        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
-        combined.sort_values(["k", "direction"]).to_csv(tmp, index=False)
-        tmp.replace(out_path)
-        logging.info("Saved %d/%d feature counts", min(start + len(batch), len(pending)), len(pending))
+            rows.extend(add_metadata(row, metadata) for row in result)
+        write_checkpoint(
+            existing,
+            rows,
+            out_path,
+            key_columns=["k", "direction"],
+            sort_columns=["k", "direction"],
+        )
+        logging.info(
+            "Saved %d/%d feature counts",
+            min(start + len(batch), len(pending)),
+            len(pending),
+        )
 
 
 if __name__ == "__main__":

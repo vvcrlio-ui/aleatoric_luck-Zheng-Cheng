@@ -17,6 +17,16 @@ from sklearn.model_selection import train_test_split
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from evaluation import r2_against_training_mean, training_mean_null_mse
+from experiment import (
+    add_metadata,
+    build_experiment_metadata,
+    load_checkpoint,
+    model_run_settings,
+    parallel_preference,
+    rows_for_experiment,
+    write_checkpoint,
+)
 from model_registry import MODEL_NAMES, make_model
 
 
@@ -157,17 +167,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _write_checkpoint(existing: pd.DataFrame, rows: list[dict], out_path: Path) -> None:
-    frames = [frame for frame in (existing, pd.DataFrame(rows)) if not frame.empty]
-    if not frames:
-        return
-    result = pd.concat(frames, ignore_index=True)
-    result = result.drop_duplicates(["model", "n_samples", "seed"], keep="last")
-    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
-    result.sort_values(["model", "n_samples", "seed"]).to_csv(tmp, index=False)
-    tmp.replace(out_path)
-
-
 def main():
     args = parse_args()
     data_path = Path(args.data)
@@ -184,6 +183,19 @@ def main():
     predictors = [col for col in df.columns if col.startswith(("Aset", "Bset"))]
     if not predictors:
         raise ValueError("No Aset/Bset predictors found in the input data.")
+    metadata = build_experiment_metadata(
+        kind="sample_size",
+        data_path=data_path,
+        outcome=args.outcome,
+        test_size=args.test_size,
+        split_seed=args.seed,
+        extra={
+            "n_sizes": args.n_sizes,
+            "min_fraction": args.min_fraction,
+            "max_fraction": args.max_fraction,
+            **model_run_settings(args.models),
+        },
+    )
     X_train, X_test, y_train, y_test = train_test_split(
         df[predictors],
         df[args.outcome],
@@ -200,7 +212,6 @@ def main():
             len(X_train),
         )
     )
-    null_mse = mean_squared_error(y_test, np.full(len(y_test), y_train.mean()))
 
     def run_one(model_name: str, n_samples: int, draw_seed: int) -> dict:
         try:
@@ -215,29 +226,40 @@ def main():
             model.fit(X_sub, y_sub)
             preds = model.predict(X_test)
             mse = mean_squared_error(y_test, preds)
-            return {
-                "model": model_name,
-                "n_samples": int(n_samples),
-                "seed": draw_seed,
-                "n_train_total": len(X_train),
-                "mse": mse,
-                "r2": r2_score(y_test, preds),
-                "r2_train_mean_baseline": 1 - mse / null_mse,
-                "status": "ok",
-                "error": "",
-            }
+            subset_null_mse = training_mean_null_mse(y_test, y_sub)
+            return add_metadata(
+                {
+                    "model": model_name,
+                    "n_samples": int(n_samples),
+                    "seed": draw_seed,
+                    "n_train_total": len(X_train),
+                    "mse": mse,
+                    "null_mse_train_subset": subset_null_mse,
+                    "r2_test_mean_baseline": r2_score(y_test, preds),
+                    "r2_train_mean_baseline": r2_against_training_mean(
+                        mse, y_test, y_sub
+                    ),
+                    "status": "ok",
+                    "error": "",
+                },
+                metadata,
+            )
         except Exception as exc:
-            return {
-                "model": model_name,
-                "n_samples": int(n_samples),
-                "seed": draw_seed,
-                "n_train_total": len(X_train),
-                "mse": np.nan,
-                "r2": np.nan,
-                "r2_train_mean_baseline": np.nan,
-                "status": "failed",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            return add_metadata(
+                {
+                    "model": model_name,
+                    "n_samples": int(n_samples),
+                    "seed": draw_seed,
+                    "n_train_total": len(X_train),
+                    "mse": np.nan,
+                    "null_mse_train_subset": np.nan,
+                    "r2_test_mean_baseline": np.nan,
+                    "r2_train_mean_baseline": np.nan,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                metadata,
+            )
 
     jobs = [
         (model, int(n), args.seed + draw)
@@ -245,10 +267,11 @@ def main():
         for n in train_sizes
         for draw in range(args.n_draws)
     ]
-    existing = pd.read_csv(out_path) if out_path.exists() else pd.DataFrame()
+    existing = load_checkpoint(out_path)
+    current = rows_for_experiment(existing, metadata["experiment_id"])
     completed = set()
-    if not existing.empty:
-        ok = existing[existing["status"].eq("ok")] if "status" in existing else existing
+    if not current.empty:
+        ok = current[current["status"].eq("ok")] if "status" in current else current
         completed = set(
             zip(ok["model"], ok["n_samples"].astype(int), ok["seed"].astype(int))
         )
@@ -257,21 +280,40 @@ def main():
     for start in range(0, len(pending), args.batch_size):
         batch = pending[start : start + args.batch_size]
         rows.extend(
-            Parallel(n_jobs=args.n_jobs, batch_size=1, prefer="threads")(
+            Parallel(
+                n_jobs=args.n_jobs,
+                batch_size=1,
+                prefer=parallel_preference(args.models),
+            )(
                 delayed(run_one)(*job) for job in batch
             )
         )
-        _write_checkpoint(existing, rows, out_path)
+        write_checkpoint(
+            existing,
+            rows,
+            out_path,
+            key_columns=["model", "n_samples", "seed"],
+            sort_columns=["model", "n_samples", "seed"],
+        )
 
     if not out_path.exists():
-        _write_checkpoint(existing, rows, out_path)
+        write_checkpoint(
+            existing,
+            rows,
+            out_path,
+            key_columns=["model", "n_samples", "seed"],
+            sort_columns=["model", "n_samples", "seed"],
+        )
     if not args.skip_power_law:
         results = pd.read_csv(out_path)
+        results = rows_for_experiment(results, metadata["experiment_id"])
         fits = fit_power_law(
             results,
             bootstrap_iterations=args.bootstrap_iterations,
             seed=args.seed,
         )
+        for key, value in metadata.items():
+            fits[key] = value
         fits.to_csv(power_path, index=False)
 
 

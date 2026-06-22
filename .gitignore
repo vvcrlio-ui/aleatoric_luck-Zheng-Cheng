@@ -26,7 +26,8 @@ datasets/
 outputs/
 results/
 runs/
-logs/
+logs/*
+!nlsy_replication/logs/.gitkeep
 
 # Env / secrets
 .env

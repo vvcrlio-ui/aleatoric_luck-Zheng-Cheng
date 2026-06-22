@@ -47,6 +47,9 @@ python src/overall_prediction.py \
 
 XGBoost uses `max_depth=2`, `eta=0.3`, and five-fold CV to choose up to 90
 boosting rounds. Ridge and Lasso also select penalties using five-fold CV.
+BART uses the paper's 200 trees, 1,000 recorded iterations (without thinning),
+and 100 burn-in iterations by default. BART jobs use process-based parallelism because BartPy's
+random-number generator is process-global.
 
 ## Extensions
 
@@ -62,6 +65,16 @@ Long-running scripts checkpoint CSV results after each batch and resume
 successful jobs from an existing output file. Failed model fits are recorded
 with `status=failed` instead of discarding the whole run.
 
+Each checkpoint row includes an `experiment_id`, outcome, data hash, split, and
+other identifying metadata. Reusing an output path with a different experiment
+does not skip work or overwrite the earlier experiment. Checkpoints created
+before this metadata was introduced must be removed or passed under a new
+`--out` path before resuming.
+
+Output columns distinguish standard `r2_test_mean_baseline` from the paper's
+`r2_train_mean_baseline`. In sample-size experiments, the latter uses the mean
+of the actual training subset for each draw.
+
 Power-law fits use non-negative bounds, bootstrap intervals, and stability
 diagnostics. The bootstrap interval remains conditional on the fixed train/test
 sample; it does not capture population sampling or holdout uncertainty.
@@ -69,7 +82,9 @@ sample; it does not capture population sampling or holdout uncertainty.
 ## SLURM
 
 The scripts in `slurm/` use job arrays, contain no user-specific cluster path,
-and write one output per model. Set these variables when cluster defaults differ:
+and write one output per model. Submit them from `nlsy_replication/`; the tracked
+`logs/` directory lets Slurm open stdout and stderr before the script starts.
+Set these variables when cluster defaults differ:
 
 ```bash
 export PROJECT_DIR=/path/to/aleatoric_luck-Zheng-Cheng/nlsy_replication

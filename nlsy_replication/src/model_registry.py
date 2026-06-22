@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,8 @@ MODEL_NAMES = (
     "random_forest",
     "bart",
 )
+
+_BART_RANDOM_LOCK = threading.Lock()
 
 
 class XGBoostCVRegressor(BaseEstimator, RegressorMixin):
@@ -180,9 +183,10 @@ class BartPyRegressor(BaseEstimator, RegressorMixin):
 
     def __init__(
         self,
-        n_trees: int = int(os.environ.get("BART_N_TREES", "50")),
-        n_samples: int = int(os.environ.get("BART_N_SAMPLES", "200")),
-        n_burn: int = int(os.environ.get("BART_N_BURN", "200")),
+        n_trees: int = int(os.environ.get("BART_N_TREES", "200")),
+        n_samples: int = int(os.environ.get("BART_N_SAMPLES", "1000")),
+        n_burn: int = int(os.environ.get("BART_N_BURN", "100")),
+        thin: float = float(os.environ.get("BART_THIN", "1.0")),
         n_chains: int = 1,
         n_jobs: int = 1,
         random_state: int | None = None,
@@ -190,6 +194,7 @@ class BartPyRegressor(BaseEstimator, RegressorMixin):
         self.n_trees = n_trees
         self.n_samples = n_samples
         self.n_burn = n_burn
+        self.thin = thin
         self.n_chains = n_chains
         self.n_jobs = n_jobs
         self.random_state = random_state
@@ -205,9 +210,6 @@ class BartPyRegressor(BaseEstimator, RegressorMixin):
                     "BART requires bartpy2 or a compatible bartpy package."
                 ) from exc
 
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
-
         self.feature_names_ = list(getattr(X, "columns", [])) or [
             f"x{i}" for i in range(np.asarray(X).shape[1])
         ]
@@ -218,6 +220,7 @@ class BartPyRegressor(BaseEstimator, RegressorMixin):
             "n_trees": self.n_trees,
             "n_samples": self.n_samples,
             "n_burn": self.n_burn,
+            "thin": self.thin,
         }
         try:
             self.model_ = SklearnModel(
@@ -225,7 +228,16 @@ class BartPyRegressor(BaseEstimator, RegressorMixin):
             )
         except TypeError:
             self.model_ = SklearnModel(**kwargs)
-        self.model_.fit(X_frame, np.asarray(y))
+        # BartPy uses NumPy's process-global RNG. Protect and restore it for
+        # direct threaded use; experiment scripts additionally use processes.
+        with _BART_RANDOM_LOCK:
+            previous_state = np.random.get_state()
+            try:
+                if self.random_state is not None:
+                    np.random.seed(self.random_state)
+                self.model_.fit(X_frame, np.asarray(y))
+            finally:
+                np.random.set_state(previous_state)
         return self
 
     def predict(self, X):

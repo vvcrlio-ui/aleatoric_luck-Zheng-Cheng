@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 VENV="${VENV:-$HOME/venvs/aleatoric-luck}"
 if command -v module >/dev/null 2>&1; then
   module purge
