@@ -60,6 +60,16 @@ class NLSYReplicationTests(unittest.TestCase):
             self.assertEqual(probabilities.shape, (80, 2), model_name)
             self.assertTrue(np.all((probabilities >= 0) & (probabilities <= 1)), model_name)
 
+    def test_classification_lasso_and_elastic_net_use_distinct_penalties(self):
+        lasso = make_model("lasso", seed=12345, n_jobs=1, task="classification")
+        elastic_net = make_model("elastic_net", seed=12345, n_jobs=1, task="classification")
+        self.assertEqual(lasso.named_steps["logisticregression"].penalty, "l1")
+        self.assertEqual(elastic_net.named_steps["logisticregression"].penalty, "elasticnet")
+        self.assertNotEqual(
+            lasso.named_steps["logisticregression"].penalty,
+            elastic_net.named_steps["logisticregression"].penalty,
+        )
+
     def test_bart_defaults_match_paper_and_use_process_parallelism(self):
         model = make_model("bart", seed=12345, n_jobs=1)
         self.assertEqual(model.n_trees, 200)

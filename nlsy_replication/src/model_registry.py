@@ -319,6 +319,7 @@ def _make_classification_model(model_name: str, seed: int, n_jobs: int = 1):
             SimpleImputer(strategy="median"),
             StandardScaler(),
             LogisticRegression(
+                penalty="l1",
                 C=1.0,
                 l1_ratio=1.0,
                 solver="saga",
@@ -331,6 +332,7 @@ def _make_classification_model(model_name: str, seed: int, n_jobs: int = 1):
             SimpleImputer(strategy="median"),
             StandardScaler(),
             LogisticRegression(
+                penalty="elasticnet",
                 C=1.0,
                 solver="saga",
                 l1_ratio=0.5,
