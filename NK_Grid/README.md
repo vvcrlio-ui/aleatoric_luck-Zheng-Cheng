@@ -59,9 +59,11 @@ python src/nk_grid.py \
   --max-n 100 --max-k 100
 
 # Classification (binary outcome, e.g. employment)
+# Replace the placeholder with your real column name; keep the quotes so
+# `<`/`>` aren't parsed as shell redirection if pasted as-is.
 python src/nk_grid.py \
   --task classification \
-  --outcome <confirmed binary employment column> \
+  --outcome "<confirmed binary employment column>" \
   --models xgboost ridge lasso \
   --out outputs/nk_grid_clf.csv
 ```
@@ -106,6 +108,29 @@ exception is marked `status=failed` with the exception recorded in `error`.
 Re-running the same `--out` path resumes from the checkpoint and skips
 combinations already recorded as `ok` or `skipped`.
 
+### Output schema
+
+Every row is one `(model, seed, draw, N, K)` combination. Beyond the
+identifying columns (`dataset`, `outcome`, `model`, `seed`, `draw`, `N`, `K`,
+`split_random_state`, `n_train_total`, `n_features_total`, `status`, `error`,
+plus provenance metadata like `experiment_id`), the metric columns depend on
+`--task`:
+
+- `regression`: 30 continuous metrics (`r2_test`, `rmse`, `mae`,
+  `spearman_rho`, `pearson_r2`, `pinball_q10`, ... — see `METRIC_COLUMNS` in
+  `src/nk_grid.py` for the full list).
+- `classification`: 8 metrics (`roc_auc`, `pr_auc`, `brier`, `log_loss`,
+  `balanced_accuracy`, `f1`, `accuracy`, `mcfadden_pseudo_r2` — see
+  `CLASSIFICATION_METRIC_COLUMNS`).
+
+A trimmed regression example:
+
+```text
+model,seed,draw,N,K,status,error,r2_test,rmse,...
+xgboost,12345,0,16,8,ok,,0.42,0.31,...
+bart,12345,0,4,1,skipped,below BART minimum N/K floor,,,...
+```
+
 ## Multi-panel runner
 
 `run_panels.py` reads a declarative YAML manifest and runs one independent
@@ -120,9 +145,10 @@ Each panel may override any preset value. The default manifest is
 `panels.yaml`:
 
 ```bash
-python src/run_panels.py --dry-run
-python src/run_panels.py --only smr_income
-python src/run_panels.py --manifest panels.yaml
+python src/run_panels.py --dry-run          # preview without running
+python src/run_panels.py                    # run every panel in panels.yaml
+python src/run_panels.py --only smr_income  # run just one named panel
+python src/run_panels.py --manifest other_panels.yaml   # use a different manifest
 ```
 
 Each panel writes to its own CSV and resumes through the same checkpoint
