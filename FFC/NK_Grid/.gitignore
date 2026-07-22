@@ -13,6 +13,11 @@ outputs/
 # Local planning/scratch docs, not for version history
 plans/
 
+# OpenSpec proposals/designs and openspec tooling, not for version history
+openspec/
+.claude/
+.codex/
+
 # Generated logs
 logs/*
 !logs/.gitkeep
